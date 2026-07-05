@@ -1,0 +1,31 @@
+{
+  "account": {
+    "username": "YOUR_BOT_USERNAME",
+    "password": "YOUR_PASSWORD"
+  },
+  "server": {
+    "host": "play.6b6t.org",
+    "port": 25565,
+    "auth": "offline",
+    "version": "1.21.1"
+  },
+  "portal": {
+    "x": -999,
+    "y": 101,
+    "z": -989,
+    "approach_distance": 3,
+    "walk_into_ticks": 30
+  },
+  "navigation": {
+    "wait_after_login_ms": 5000,
+    "wait_between_worlds_ms": 4000,
+    "max_portal_attempts": 3
+  },
+  "stash": {
+    "exploreRadius": 256,
+    "checkDelay": 500,
+    "autoReconnect": true,
+    "reconnectDelay": 10000
+  },
+  "whitelist": ["YOUR_USERNAME"]
+}

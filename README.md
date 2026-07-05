@@ -4,11 +4,13 @@ A Minecraft bot that connects to the 6b6t anarchy server, navigates through the 
 
 ## Features
 
-- Automatic login and authentication (supports both offline and premium accounts)
-- Portal navigation — walks from spawn island through the nether portal to the anarchy world
-- Auto-reconnect on disconnect or kick
-- Chat commands (`!status` to check position, health, and dimension)
-- Built with mineflayer for reliable Minecraft bot control
+- **Automatic registration/login** — 6b6t requires `/register` + `/login` even for offline mode; the bot handles it automatically
+- **Portal navigation** — walks from spawn island through the nether portal to the anarchy world
+- **Auto-reconnect** — reconnects on disconnect or kick, cleans up old bot listeners properly
+- **Private commands** — `!status` replies via `/msg` to keep your position hidden from other players
+- **Void guard** — stops movement if the bot starts falling into the void
+- **EnderDash detection** — logs verification URLs when EnderDash is triggered
+- **Graceful shutdown** — press Ctrl+C to cleanly stop the bot
 
 ## Prerequisites
 
@@ -19,7 +21,7 @@ A Minecraft bot that connects to the 6b6t anarchy server, navigates through the 
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/6b6t-stash-bot.git
+git clone https://github.com/prathamsethiongithub/6b6t-stash-bot.git
 cd 6b6t-stash-bot
 
 # Install dependencies
@@ -28,13 +30,19 @@ npm install
 
 ## Configuration
 
-Edit `config.json` to set up your bot:
+1. Copy the example config:
+
+```bash
+cp config.example.json config.json
+```
+
+2. Edit `config.json` with your bot's settings:
 
 ```json
 {
   "account": {
     "username": "YOUR_BOT_USERNAME",
-    "password": ""
+    "password": "YOUR_PASSWORD"
   },
   "server": {
     "host": "play.6b6t.org",
@@ -59,20 +67,24 @@ Edit `config.json` to set up your bot:
     "checkDelay": 500,
     "autoReconnect": true,
     "reconnectDelay": 10000
-  }
+  },
+  "whitelist": ["YOUR_USERNAME"]
 }
 ```
+
+> ⚠️ **Security note:** `config.json` is gitignored so your password won't be committed. Use `config.example.json` as the template.
 
 ### Config Options
 
 | Field | Description |
 |-------|-------------|
 | `account.username` | Your bot's Minecraft username |
-| `account.password` | Leave empty for offline mode, or set your password if the server requires login |
+| `account.password` | Password for `/register` and `/login`. If empty, one is auto-generated |
 | `server.host` | Minecraft server IP |
 | `server.auth` | `"offline"` for cracked servers, `"microsoft"` for premium accounts |
 | `portal.x/y/z` | Coordinates of the portal to navigate to |
 | `stash.autoReconnect` | Whether to auto-reconnect on disconnect |
+| `whitelist` | List of usernames allowed to use bot commands |
 
 ## Usage
 
@@ -82,25 +94,26 @@ npm start
 
 The bot will:
 1. Connect to the server
-2. Wait for the world to load
-3. Automatically navigate to the portal and enter the anarchy world
-4. Stay online and respond to the `!status` command in chat
+2. Automatically register/login
+3. Navigate from spawn island through the portal to the anarchy world
+4. Stay online and respond to commands via private message
 
-### Chat Commands
+### Commands
 
-- `!status` — Shows the bot's current position, health, and dimension
+- `!status` — The bot replies with its position, health, and dimension via `/msg` (whitelist-only)
 
 ## Project Structure
 
 ```
 6b6t-stash-bot/
-├── index.js           # Main entry point
-├── config.json        # Bot configuration
-├── package.json       # Dependencies and scripts
+├── index.js              # Main entry point
+├── config.json           # Your bot configuration (gitignored)
+├── config.example.json   # Example config template
+├── package.json          # Dependencies and scripts
 ├── modules/
-│   ├── auth.js        # Authentication and login handler
-│   └── navigation.js  # Portal navigation and pathfinding
-└── README.md          # This file
+│   ├── auth.js           # Authentication and login handler
+│   └── navigation.js     # Portal navigation and pathfinding
+└── README.md             # This file
 ```
 
 ## Dependencies

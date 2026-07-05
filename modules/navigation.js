@@ -5,9 +5,6 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-let navigating = false;
-let isDead = false;
-
 // ============================================================
 // Controlla se siamo in una lobby/spawn island
 // (sulla spawn island la difficoltà NON è 'hard')
@@ -18,12 +15,29 @@ function isInLobby(bot) {
 }
 
 // ============================================================
-// Cammina in avanti usando waitForTicks
+// Cammina in avanti usando waitForTicks, con void guard
 // ============================================================
 async function walkForwardTicks(bot, ticks) {
+    const startY = bot.entity.position.y;
     bot.setControlState('forward', true);
+
+    // Monitor Y position to avoid walking off the void
+    let voidCheckInterval = setInterval(() => {
+        const y = bot.entity ? bot.entity.position.y : startY;
+        if (y < startY - 5) {
+            bot.setControlState('forward', false);
+            console.log(chalk.red('[Nav] Rilevato vuoto! Movimento fermato.'));
+            clearInterval(voidCheckInterval);
+            voidCheckInterval = null;
+        }
+    }, 200);
+
     await bot.waitForTicks(ticks);
     bot.setControlState('forward', false);
+
+    if (voidCheckInterval) {
+        clearInterval(voidCheckInterval);
+    }
     await sleep(1000);
 }
 
@@ -57,13 +71,11 @@ async function navigateToPortal(bot, portalCoords) {
 
 // ============================================================
 // Entra fisicamente nel portale camminando in avanti
-// Tutti i listener vengono registrati PRIMA di iniziare il movimento
-// per evitare race condition con l'evento spawn
 // ============================================================
 async function enterPortal(bot, walkTicks) {
     console.log(chalk.yellow('[Nav] Entrata nel portale...'));
 
-    const startPos = { x: bot.entity.position.x, z: bot.entity.position.z };
+    const startPos = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
 
     return new Promise((resolve) => {
         let resolved = false;
@@ -71,6 +83,7 @@ async function enterPortal(bot, walkTicks) {
         const cleanup = () => {
             clearTimeout(timeout);
             clearInterval(posCheck);
+            clearInterval(voidGuard);
             bot.removeListener('spawn', onSpawn);
             bot.setControlState('forward', false);
         };
@@ -103,18 +116,27 @@ async function enterPortal(bot, walkTicks) {
             }
         }, 500);
 
-        // REGISTRA LISTENER PRIMA di iniziare il movimento
+        // Void guard - stop if Y drops significantly
+        const voidGuard = setInterval(() => {
+            if (resolved) return;
+            const y = bot.entity ? bot.entity.position.y : startPos.y;
+            if (y < startPos.y - 5) {
+                resolved = true;
+                cleanup();
+                console.log(chalk.red('[Nav] Rilevata caduta nel vuoto! Movimento fermato.'));
+                resolve(false);
+            }
+        }, 200);
+
+        // Register spawn listener before moving
         bot.once('spawn', onSpawn);
 
-        // Ora inizia il movimento
+        // Start moving
         bot.setControlState('forward', true);
 
-        // Se walkTicks è specificato, ferma dopo N tick (~50ms per tick)
         if (walkTicks && walkTicks > 0) {
             setTimeout(() => {
                 if (!resolved) {
-                    // Non fermare il movimento, ma segnala che abbiamo camminato abbastanza
-                    // Il bot continuerà ad avanzare fino al timeout o cambio dimensione
                     console.log(chalk.gray(`[Nav] Camminato per ${walkTicks} tick, in attesa cambio dimensione...`));
                 }
             }, walkTicks * 50);
@@ -132,20 +154,23 @@ async function navigateToWorlds(bot, config) {
     const waitAfterLogin = nav.wait_after_login_ms || 5000;
     const maxAttempts = nav.max_portal_attempts || 3;
 
-    isDead = false;
-    navigating = true;
+    // Per-instance state (not module-level globals)
+    let isNavigating = false;
+    let isDead = false;
 
     return new Promise((resolve, reject) => {
         const onKicked = (reason) => {
             if (!isDead) {
                 isDead = true;
                 console.log(chalk.red(`[Nav] Kickato: ${reason}`));
+                isNavigating = false;
             }
         };
 
         const onEnd = () => {
-            if (navigating && !isDead) {
+            if (isNavigating && !isDead) {
                 isDead = true;
+                isNavigating = false;
                 reject(new Error('Disconnesso durante navigazione'));
             }
         };
@@ -155,6 +180,8 @@ async function navigateToWorlds(bot, config) {
 
         (async () => {
             try {
+                isNavigating = true;
+
                 console.log(chalk.bold.yellow('\n[Nav] === RILEVAMENTO POSIZIONE ==='));
                 console.log(chalk.gray(`[Nav] Posizione: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
                 console.log(chalk.gray(`[Nav] Dimensione: ${bot.game.dimension}`));
@@ -167,7 +194,7 @@ async function navigateToWorlds(bot, config) {
 
                 if (!isInLobby(bot)) {
                     console.log(chalk.green('[Nav] Difficoltà HARD - già nel mondo anarchy! Nessuna navigazione necessaria.'));
-                    navigating = false;
+                    isNavigating = false;
                     resolve();
                     return;
                 }
@@ -221,12 +248,12 @@ async function navigateToWorlds(bot, config) {
                 console.log(chalk.green(`[Nav] Posizione finale: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
                 console.log(chalk.green(`[Nav] Dimensione: ${bot.game.dimension}`));
 
-                navigating = false;
+                isNavigating = false;
                 console.log(chalk.bold.green('\n[Nav] Bot pronto nel mondo anarchy!'));
                 resolve();
 
             } catch (err) {
-                navigating = false;
+                isNavigating = false;
                 console.error(chalk.red(`[Nav] Errore navigazione: ${err.message}`));
                 reject(err);
             } finally {
@@ -237,11 +264,4 @@ async function navigateToWorlds(bot, config) {
     });
 }
 
-function getNavigationState() {
-    return {
-        navigating: navigating,
-        isDead: isDead
-    };
-}
-
-module.exports = { navigateToWorlds, isInLobby, getNavigationState };
+module.exports = { navigateToWorlds };
