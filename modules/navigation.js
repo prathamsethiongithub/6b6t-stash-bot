@@ -45,12 +45,21 @@ async function walkForwardTicks(bot, ticks) {
 // Strafe lateralmente per trovare il portale quando il bot
 // non riesce a camminarci dentro dritto
 // ============================================================
-async function strafeIntoPortal(bot, startPos, durationMs) {
+async function strafeIntoPortal(bot, startPos, durationMs, cancelRef) {
     return new Promise((resolve) => {
         const startTime = Date.now();
         let strafeDir = 'left';
 
         const interval = setInterval(() => {
+            // Stop immediately if enterPortal has resolved
+            if (cancelRef && cancelRef.cancelled) {
+                clearInterval(interval);
+                bot.setControlState('left', false);
+                bot.setControlState('right', false);
+                resolve();
+                return;
+            }
+
             if (Date.now() - startTime > durationMs) {
                 clearInterval(interval);
                 bot.setControlState('left', false);
@@ -103,7 +112,7 @@ async function navigateToPortal(bot, portalCoords) {
 // ============================================================
 // Entra fisicamente nel portale camminando in avanti
 // ============================================================
-async function enterPortal(bot, portalCoords, walkTicks) {
+async function enterPortal(bot, portalCoords) {
     console.log(chalk.yellow('[Nav] Entrata nel portale...'));
 
     // First, look at the portal block so forward movement goes through it
@@ -123,7 +132,7 @@ async function enterPortal(bot, portalCoords, walkTicks) {
     return new Promise((resolve) => {
         let resolved = false;
 
-        const cleanup = () => {
+        let cleanup = () => {
             clearTimeout(timeout);
             clearInterval(posCheck);
             clearInterval(voidGuard);
@@ -209,7 +218,14 @@ async function enterPortal(bot, portalCoords, walkTicks) {
                 // If we barely moved, try to strafe into the portal
                 if (distMoved < 1.5 && !resolved) {
                     console.log(chalk.yellow('[Nav] Poco movimento, provo strafe per trovare il portale...'));
-                    strafeIntoPortal(bot, startPos, 3000).then(() => {
+                    const cancelRef = { cancelled: false };
+                    // Cancel strafe when enterPortal resolves
+                    const origCleanup = cleanup;
+                    cleanup = () => {
+                        cancelRef.cancelled = true;
+                        origCleanup();
+                    };
+                    strafeIntoPortal(bot, startPos, 3000, cancelRef).then(() => {
                         if (!resolved) {
                             console.log(chalk.gray('[Nav] Strafe completato, in attesa...'));
                         }
@@ -311,7 +327,7 @@ async function navigateToWorlds(bot, config) {
 
                 if (isDead) throw new Error('Disconnesso');
 
-                const dimensionChanged = await enterPortal(bot, portalCoords, walkTicks);
+                const dimensionChanged = await enterPortal(bot, portalCoords);
 
                 if (!dimensionChanged) {
                     console.log(chalk.yellow('[Nav] Nessun cambio dimensione rilevato. Potrei già essere nel mondo anarchy o il portale non era attivo.'));
