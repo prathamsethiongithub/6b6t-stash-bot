@@ -82,9 +82,29 @@ async function strafeIntoPortal(bot, startPos, durationMs, cancelRef) {
 }
 
 // ============================================================
-// Navigazione verso il portale usando mineflayer-pathfinder
+// Trova il portale più vicino (nether_portal o end_portal)
 // ============================================================
-async function navigateToPortal(bot, portalCoords) {
+async function findPortalBlock(bot, maxDistance) {
+    if (!bot.findBlock) return null;
+
+    const portalBlock = bot.findBlock({
+        matching: (block) => block.name === 'nether_portal' || block.name === 'end_portal',
+        maxDistance: maxDistance || 100
+    });
+
+    if (portalBlock) {
+        console.log(chalk.green(`[Nav] Trovato portale nelle vicinanze: ${portalBlock.name} a (${portalBlock.position.x}, ${portalBlock.position.y}, ${portalBlock.position.z})`));
+        return portalBlock;
+    }
+
+    console.log(chalk.yellow(`[Nav] Nessun portale trovato nel raggio di ${maxDistance || 100} blocchi.`));
+    return null;
+}
+
+// ============================================================
+// Navigazione verso coordinate usando mineflayer-pathfinder
+// ============================================================
+async function navigateToCoords(bot, x, y, z, approachDist) {
     if (!bot.pathfinder) {
         bot.loadPlugin(pathfinder);
     }
@@ -95,13 +115,13 @@ async function navigateToPortal(bot, portalCoords) {
     movements.allow1by1towers = false;
     bot.pathfinder.setMovements(movements);
 
-    const approachDist = portalCoords.approach_distance || 1;
+    const dist = approachDist || 1;
 
-    console.log(chalk.yellow(`[Nav] Pathfinding verso portale (${portalCoords.x}, ${portalCoords.y}, ${portalCoords.z})...`));
+    console.log(chalk.yellow(`[Nav] Pathfinding verso (${x}, ${y}, ${z})...`));
 
     try {
-        await bot.pathfinder.goto(new goals.GoalNear(portalCoords.x, portalCoords.y, portalCoords.z, approachDist));
-        console.log(chalk.green('[Nav] Raggiunta prossimità del portale!'));
+        await bot.pathfinder.goto(new goals.GoalNear(x, y, z, dist));
+        console.log(chalk.green(`[Nav] Raggiunta destinazione!`));
         return true;
     } catch (err) {
         console.log(chalk.red(`[Nav] Pathfinding fallito: ${err.message}`));
@@ -119,7 +139,7 @@ async function enterPortal(bot, portalCoords) {
     try {
         const dx = portalCoords.x - bot.entity.position.x;
         const dz = portalCoords.z - bot.entity.position.z;
-        const yaw = Math.atan2(dx, dz);
+        const yaw = Math.atan2(-dx, dz);
         await bot.look(yaw, 0, false);
         console.log(chalk.gray(`[Nav] Guardando verso portale (yaw: ${yaw.toFixed(2)})`));
     } catch (e) {
@@ -237,7 +257,79 @@ async function enterPortal(bot, portalCoords) {
 }
 
 // ============================================================
-// Navigazione completa: spawn island -> portale -> mondo anarchy
+// Trova e naviga verso un portale (nether o end) nelle
+// vicinanze. Se non trova nulla, usa le coordinate config.
+// ============================================================
+async function findAndGoToPortal(bot, portalCoords, maxAttempts, walkTicks) {
+    console.log(chalk.yellow('[Nav] Cerco un portale nelle vicinanze...'));
+
+    // Try to find a portal block dynamically
+    const foundPortal = await findPortalBlock(bot, 100);
+
+    let targetCoords;
+    let foundDynamically = false;
+
+    if (foundPortal) {
+        targetCoords = {
+            x: foundPortal.position.x,
+            y: foundPortal.position.y,
+            z: foundPortal.position.z
+        };
+        foundDynamically = true;
+        console.log(chalk.green(`[Nav] Usando portale trovato in posizione!`));
+    } else {
+        targetCoords = portalCoords;
+        console.log(chalk.yellow(`[Nav] Nessun portale trovato, uso coordinate configurate: (${portalCoords.x}, ${portalCoords.y}, ${portalCoords.z})`));
+    }
+
+    // Navigate to the portal
+    let reachedPortal = false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        console.log(chalk.bold.yellow(`\n[Nav] Tentativo ${attempt}/${maxAttempts}: navigazione verso portale...`));
+
+        reachedPortal = await navigateToCoords(bot, targetCoords.x, targetCoords.y, targetCoords.z,
+            foundDynamically ? 2 : (portalCoords.approach_distance || 1));
+
+        if (reachedPortal) break;
+
+        if (attempt < maxAttempts) {
+            console.log(chalk.yellow('[Nav] Attesa 5s prima del prossimo tentativo...'));
+            await sleep(5000);
+        }
+    }
+
+    // If pathfinding failed and we have configured coords we haven't tried, try those too
+    if (!reachedPortal && !foundDynamically) {
+        console.log(chalk.yellow('[Nav] Pathfinding fallito. Tentativo movimento manuale...'));
+
+        try {
+            const dx = portalCoords.x - bot.entity.position.x;
+            const dz = portalCoords.z - bot.entity.position.z;            const yaw = Math.atan2(-dx, dz);
+                        await bot.look(yaw, 0, false);
+                    } catch (e) {}
+                    await sleep(500);
+
+                    console.log(chalk.yellow('[Nav] Movimento manuale verso presunta direzione del portale...'));
+                    await walkForwardTicks(bot, walkTicks);
+    }
+
+    if (!reachedPortal) {
+        console.log(chalk.yellow('[Nav] Non sono riuscito a raggiungere il portale. Provo comunque entrata...'));
+    }
+
+    // Enter the portal
+    const entered = await enterPortal(bot, targetCoords);
+
+    if (!entered) {
+        console.log(chalk.yellow('[Nav] Il portale non ha funzionato. Potrebbe non essere attivo.'));
+    }
+
+    return entered;
+}
+
+// ============================================================
+// Navigazione completa attraverso le dimensioni
+// The End (spawn) -> Overworld (portale nether) -> Nether
 // ============================================================
 async function navigateToWorlds(bot, config) {
     const nav = config.navigation || {};
@@ -284,6 +376,7 @@ async function navigateToWorlds(bot, config) {
 
                 if (isDead) throw new Error('Disconnesso');
 
+                // If already in hard difficulty (anarchy world), no navigation needed
                 if (!isInLobby(bot)) {
                     console.log(chalk.green('[Nav] Difficoltà HARD - già nel mondo anarchy! Nessuna navigazione necessaria.'));
                     isNavigating = false;
@@ -291,57 +384,101 @@ async function navigateToWorlds(bot, config) {
                     return;
                 }
 
-                console.log(chalk.yellow('[Nav] Rilevata spawn island (difficoltà non-HARD). Navigazione verso il portale...'));
-                console.log(chalk.yellow(`[Nav] Coordinate portale: ${portalCoords.x}, ${portalCoords.y}, ${portalCoords.z}`));
+                // Log which kind of spawn island we're on
+                const dimension = bot.game.dimension;
+                console.log(chalk.yellow(`[Nav] Rilevata spawn island in dimensione: ${dimension}`));
 
-                let reachedPortal = false;
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    if (isDead) throw new Error('Disconnesso');
+                // ============================================================
+                // STAGE 1: If in The End, find the exit portal back to Overworld
+                // ============================================================
+                if (dimension === 'the_end') {
+                    console.log(chalk.bold.yellow('\n[Nav] === STAGE 1: USCITA DAL THE END ==='));
+                    console.log(chalk.yellow('[Nav] Siamo nel The End! Cerco il portale di uscita...'));
 
-                    console.log(chalk.bold.yellow(`\n[Nav] Tentativo ${attempt}/${maxAttempts}: navigazione verso portale...`));
+                    // First try to find an end portal block (exit portal)
+                    const endPortal = await findPortalBlock(bot, 256);
 
-                    reachedPortal = await navigateToPortal(bot, portalCoords);
+                    if (endPortal) {
+                        console.log(chalk.green(`[Nav] Trovato portale di uscita del The End!`));
+                        const portalPos = {
+                            x: endPortal.position.x,
+                            y: endPortal.position.y,
+                            z: endPortal.position.z
+                        };
 
-                    if (reachedPortal) break;
+                        const reached = await navigateToCoords(bot, portalPos.x, portalPos.y, portalPos.z, 1);
+                        if (reached) {
+                            const changed = await enterPortal(bot, portalPos);
+                            if (changed) {
+                                console.log(chalk.green('[Nav] Usciti dal The End!'));
+                                await sleep(3000);
 
-                    if (attempt < maxAttempts) {
-                        console.log(chalk.yellow('[Nav] Attesa 5s prima del prossimo tentativo...'));
-                        await sleep(5000);
+                                // Check new dimension
+                                console.log(chalk.gray(`[Nav] Nuova dimensione: ${bot.game.dimension}`));
+                                console.log(chalk.gray(`[Nav] Nuova posizione: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
+
+                                // If still in the_end, end portal didn't work - try configured coords
+                                if (bot.game.dimension === 'the_end') {
+                                    console.log(chalk.yellow('[Nav] Ancora nel The End! Provo le coordinate configurate...'));
+                                } else {
+                                    // We're now in the Overworld - proceed to Stage 2
+                                    console.log(chalk.green('[Nav] Successo! Ora nell\'Overworld.'));
+                                }
+                            } else {
+                                console.log(chalk.yellow('[Nav] Portale di uscita non funzionante. Provo coordinate configurate...'));
+                            }
+                        } else {
+                            console.log(chalk.yellow('[Nav] Impossibile raggiungere il portale di uscita. Provo coordinate configurate...'));
+                        }
+                    } else {
+                        console.log(chalk.yellow('[Nav] Nessun portale di uscita trovato nel The End. Provo le coordinate configurate...'));
+                    }
+
+                    // Fallback: try configured coordinates (might be a player-built portal in The End)
+                    if (bot.game.dimension === 'the_end') {
+                        console.log(chalk.bold.yellow('\n[Nav] Tentativo con coordinate configurate nel The End...'));
+                        await findAndGoToPortal(bot, portalCoords, maxAttempts, walkTicks);
+                        await sleep(3000);
+
+                        if (bot.game.dimension !== 'the_end') {
+                            console.log(chalk.green('[Nav] Dimensione cambiata!'));
+                            console.log(chalk.gray(`[Nav] Nuova dimensione: ${bot.game.dimension}`));
+                        }
                     }
                 }
 
-                if (!reachedPortal) {
-                    console.log(chalk.yellow('[Nav] Pathfinding fallito. Tentativo movimento manuale...'));
+                // ============================================================
+                // STAGE 2: If in Overworld, find the nether portal
+                // ============================================================
+                if (bot.game.dimension === 'overworld') {
+                    console.log(chalk.bold.yellow('\n[Nav] === STAGE 2: OVERWORLD -> NETHER ==='));
+                    console.log(chalk.yellow(`[Nav] Cerco il portale per il Nether verso (${portalCoords.x}, ${portalCoords.y}, ${portalCoords.z})...`));
 
-                    try {
-                        const dx = portalCoords.x - bot.entity.position.x;
-                        const dz = portalCoords.z - bot.entity.position.z;
-                        const yaw = Math.atan2(dx, dz);
-                        await bot.look(yaw, 0, false);
-                    } catch (e) {}
-                    await sleep(500);
-
-                    console.log(chalk.yellow('[Nav] Movimento manuale verso presunta direzione del portale...'));
-                    await walkForwardTicks(bot, walkTicks);
+                    await findAndGoToPortal(bot, portalCoords, maxAttempts, walkTicks);
+                    await sleep(3000);
                 }
 
-                if (isDead) throw new Error('Disconnesso');
+                // ============================================================
+                // STAGE 3: If in Nether, we're done! (or check if we need to go further)
+                // ============================================================
+                console.log(chalk.bold.yellow('\n[Nav] === VERIFICA FINALE ==='));
+                console.log(chalk.gray(`[Nav] Posizione finale: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
+                console.log(chalk.gray(`[Nav] Dimensione: ${bot.game.dimension}`));
 
-                const dimensionChanged = await enterPortal(bot, portalCoords);
-
-                if (!dimensionChanged) {
-                    console.log(chalk.yellow('[Nav] Nessun cambio dimensione rilevato. Potrei già essere nel mondo anarchy o il portale non era attivo.'));
+                if (bot.game.dimension === 'the_end') {
+                    console.log(chalk.red('[Nav] Ancora nel The End! La navigazione non è riuscita.'));
+                    console.log(chalk.yellow('[Nav] Il server potrebbe richiedere una verifica EnderDash per uscire dal The End.'));
+                } else if (bot.game.dimension === 'overworld') {
+                    console.log(chalk.yellow('[Nav] Nell\'Overworld ma non nel Nether. Il portale potrebbe non essere attivo.'));
+                } else if (bot.game.dimension === 'nether') {
+                    console.log(chalk.green('[Nav] Nel Nether! Navigazione completata con successo!'));
                 }
 
                 bot.clearControlStates();
                 await sleep(2000);
 
-                console.log(chalk.bold.green('\n[Nav] === NAVIGAZIONE COMPLETATA ==='));
-                console.log(chalk.green(`[Nav] Posizione finale: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
-                console.log(chalk.green(`[Nav] Dimensione: ${bot.game.dimension}`));
-
                 isNavigating = false;
-                console.log(chalk.bold.green('\n[Nav] Bot pronto nel mondo anarchy!'));
+                console.log(chalk.bold.green('\n[Nav] === NAVIGAZIONE COMPLETATA ==='));
                 resolve();
 
             } catch (err) {
