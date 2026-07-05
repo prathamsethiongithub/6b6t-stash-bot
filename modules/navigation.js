@@ -42,6 +42,37 @@ async function walkForwardTicks(bot, ticks) {
 }
 
 // ============================================================
+// Strafe lateralmente per trovare il portale quando il bot
+// non riesce a camminarci dentro dritto
+// ============================================================
+async function strafeIntoPortal(bot, startPos, durationMs) {
+    return new Promise((resolve) => {
+        const startTime = Date.now();
+        let strafeDir = 'left';
+
+        const interval = setInterval(() => {
+            if (Date.now() - startTime > durationMs) {
+                clearInterval(interval);
+                bot.setControlState('left', false);
+                bot.setControlState('right', false);
+                resolve();
+                return;
+            }
+
+            // Switch direction every 800ms
+            if (strafeDir === 'left') {
+                bot.setControlState('left', true);
+                bot.setControlState('right', false);
+            } else {
+                bot.setControlState('left', false);
+                bot.setControlState('right', true);
+            }
+            strafeDir = strafeDir === 'left' ? 'right' : 'left';
+        }, 800);
+    });
+}
+
+// ============================================================
 // Navigazione verso il portale usando mineflayer-pathfinder
 // ============================================================
 async function navigateToPortal(bot, portalCoords) {
@@ -55,7 +86,7 @@ async function navigateToPortal(bot, portalCoords) {
     movements.allow1by1towers = false;
     bot.pathfinder.setMovements(movements);
 
-    const approachDist = portalCoords.approach_distance || 3;
+    const approachDist = portalCoords.approach_distance || 1;
 
     console.log(chalk.yellow(`[Nav] Pathfinding verso portale (${portalCoords.x}, ${portalCoords.y}, ${portalCoords.z})...`));
 
@@ -72,10 +103,22 @@ async function navigateToPortal(bot, portalCoords) {
 // ============================================================
 // Entra fisicamente nel portale camminando in avanti
 // ============================================================
-async function enterPortal(bot, walkTicks) {
+async function enterPortal(bot, portalCoords, walkTicks) {
     console.log(chalk.yellow('[Nav] Entrata nel portale...'));
 
+    // First, look at the portal block so forward movement goes through it
+    try {
+        const dx = portalCoords.x - bot.entity.position.x;
+        const dz = portalCoords.z - bot.entity.position.z;
+        const yaw = Math.atan2(dx, dz);
+        await bot.look(yaw, 0, false);
+        console.log(chalk.gray(`[Nav] Guardando verso portale (yaw: ${yaw.toFixed(2)})`));
+    } catch (e) {
+        console.log(chalk.red(`[Nav] Errore nel puntare verso il portale: ${e.message}`));
+    }
+
     const startPos = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+    console.log(chalk.gray(`[Nav] Posizione iniziale: ${startPos.x.toFixed(1)}, ${startPos.y.toFixed(1)}, ${startPos.z.toFixed(1)}`));
 
     return new Promise((resolve) => {
         let resolved = false;
@@ -88,30 +131,42 @@ async function enterPortal(bot, walkTicks) {
             bot.setControlState('forward', false);
         };
 
+        // Use a longer timeout for portal travel (30s should be enough)
         const timeout = setTimeout(() => {
             if (resolved) return;
             resolved = true;
             cleanup();
-            console.log(chalk.yellow('[Nav] Timeout cambio dimensione. Verifico posizione...'));
+            console.log(chalk.yellow('[Nav] Timeout cambio dimensione dopo 30s.'));
             resolve(false);
-        }, 10000);
+        }, 30000);
 
         const onSpawn = () => {
             if (resolved) return;
-            resolved = true;
-            cleanup();
-            console.log(chalk.green('[Nav] Cambio dimensione rilevato (evento spawn)!'));
-            resolve(true);
+            // Brief delay to let dimension/chunk load
+            setTimeout(() => {
+                if (!resolved && bot.entity) {
+                    resolved = true;
+                    cleanup();
+                    console.log(chalk.green('[Nav] Cambio dimensione rilevato (evento spawn)!'));
+                    resolve(true);
+                }
+            }, 2000);
         };
 
+        // Note: 'end' event is handled by navigateToWorlds which will
+        // reject the navigation promise. We don't register our own 'end'
+        // listener here because it would race with the parent handler.
+
         const posCheck = setInterval(() => {
-            if (resolved) return;
+            if (resolved || !bot.entity) return;
             const dx = Math.abs(bot.entity.position.x - startPos.x);
             const dz = Math.abs(bot.entity.position.z - startPos.z);
-            if (dx > 50 || dz > 50) {
+            const dy = Math.abs(bot.entity.position.y - startPos.y);
+            // Check for a significant change in position indicating teleport
+            if (dx > 50 || dz > 50 || dy > 20) {
                 resolved = true;
                 cleanup();
-                console.log(chalk.green('[Nav] Teletrasporto rilevato!'));
+                console.log(chalk.green(`[Nav] Teletrasporto rilevato! Posizione: ${bot.entity.position.x.toFixed(1)}, ${bot.entity.position.y.toFixed(1)}, ${bot.entity.position.z.toFixed(1)}`));
                 resolve(true);
             }
         }, 500);
@@ -128,19 +183,40 @@ async function enterPortal(bot, walkTicks) {
             }
         }, 200);
 
-        // Register spawn listener before moving
+        // Register event listener before moving
         bot.once('spawn', onSpawn);
 
-        // Start moving
+        // ------------------------------------------------------------
+        // Walk INTO the portal for a short burst, then STOP and wait.
+        // Minecraft requires standing INSIDE the portal block for ~4
+        // seconds (Survival mode) before the teleport fires. If the bot
+        // keeps walking forward, it'll pass through the 1-block-thick
+        // portal and exit the other side before the timer completes.
+        // ------------------------------------------------------------
         bot.setControlState('forward', true);
 
-        if (walkTicks && walkTicks > 0) {
-            setTimeout(() => {
-                if (!resolved) {
-                    console.log(chalk.gray(`[Nav] Camminato per ${walkTicks} tick, in attesa cambio dimensione...`));
+        // Walk forward for ~1.5 seconds to step inside the portal frame
+        setTimeout(() => {
+            if (!resolved) {
+                bot.setControlState('forward', false);
+                const curPos = bot.entity ? bot.entity.position : startPos;
+                const distMoved = Math.sqrt(
+                    Math.pow(curPos.x - startPos.x, 2) +
+                    Math.pow(curPos.z - startPos.z, 2)
+                );
+                console.log(chalk.gray(`[Nav] Fermo nel portale (spostato ${distMoved.toFixed(1)}m). In attesa cambio dimensione...`));
+
+                // If we barely moved, try to strafe into the portal
+                if (distMoved < 1.5 && !resolved) {
+                    console.log(chalk.yellow('[Nav] Poco movimento, provo strafe per trovare il portale...'));
+                    strafeIntoPortal(bot, startPos, 3000).then(() => {
+                        if (!resolved) {
+                            console.log(chalk.gray('[Nav] Strafe completato, in attesa...'));
+                        }
+                    });
                 }
-            }, walkTicks * 50);
-        }
+            }
+        }, 1500);
     });
 }
 
@@ -150,7 +226,7 @@ async function enterPortal(bot, walkTicks) {
 async function navigateToWorlds(bot, config) {
     const nav = config.navigation || {};
     const portalCoords = config.portal || { x: -999, y: 101, z: -989 };
-    const walkTicks = portalCoords.walk_into_ticks || 30;
+    const walkTicks = portalCoords.walk_into_ticks || 60;
     const waitAfterLogin = nav.wait_after_login_ms || 5000;
     const maxAttempts = nav.max_portal_attempts || 3;
 
@@ -235,10 +311,10 @@ async function navigateToWorlds(bot, config) {
 
                 if (isDead) throw new Error('Disconnesso');
 
-                const dimensionChanged = await enterPortal(bot, walkTicks);
+                const dimensionChanged = await enterPortal(bot, portalCoords, walkTicks);
 
                 if (!dimensionChanged) {
-                    console.log(chalk.yellow('[Nav] Nessun cambio dimensione rilevato. Potrei già essere nel mondo anarchy.'));
+                    console.log(chalk.yellow('[Nav] Nessun cambio dimensione rilevato. Potrei già essere nel mondo anarchy o il portale non era attivo.'));
                 }
 
                 bot.clearControlStates();
